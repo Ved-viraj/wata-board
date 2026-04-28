@@ -13,6 +13,7 @@ export interface PaymentRequest {
   amount: number;
   userId: string;
   memo?: string;
+  nonce: string; // Unique nonce to prevent replay attacks
 }
 
 // Updated interface using standardized types
@@ -27,7 +28,8 @@ function convertToStandardRequest(legacyRequest: PaymentRequest): SharedPaymentR
     meterId: legacyRequest.meter_id,
     amount: legacyRequest.amount,
     userId: legacyRequest.userId,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    nonce: legacyRequest.nonce
   };
 }
 
@@ -259,7 +261,8 @@ export class PaymentService {
     const tx = await client.pay_bill({
       meter_id: request.meter_id,
       amount: request.amount,
-      memo: request.memo
+      memo: request.memo,
+      nonce: request.nonce
     });
 
     // For backend processing, we'd need to sign with the admin key
