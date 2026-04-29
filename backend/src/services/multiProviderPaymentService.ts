@@ -43,6 +43,13 @@ export class MultiProviderPaymentService {
       const provider = this.providerService.getProviderById(request.providerId);
       if (!provider || !provider.isActive) {
         const errorMessage = `Provider ${request.providerId} is not available`;
+        auditLogger.security('Payment rejected: provider unavailable', {
+          userId: request.userId,
+          providerId: request.providerId,
+          meterId: request.meter_id,
+          amount: request.amount,
+          paymentId
+        });
         void notifyPaymentWebhook({
           event: 'payment.failed',
           paymentId,
@@ -97,6 +104,14 @@ export class MultiProviderPaymentService {
           providerId: request.providerId,
           rateLimitResult 
         });
+        auditLogger.security('Payment rejected: provider rate limit exceeded', {
+          userId: request.userId,
+          providerId: request.providerId,
+          meterId: request.meter_id,
+          amount: request.amount,
+          paymentId,
+          rateLimitInfo: rateLimitResult
+        });
         void notifyPaymentWebhook({
           event: 'payment.failed',
           paymentId,
@@ -125,6 +140,15 @@ export class MultiProviderPaymentService {
           providerId: request.providerId,
           queuePosition: rateLimitResult.queuePosition 
         });
+        auditLogger.log('Payment queued for provider', {
+          userId: request.userId,
+          providerId: request.providerId,
+          meterId: request.meter_id,
+          amount: request.amount,
+          paymentId,
+          queuePosition: rateLimitResult.queuePosition,
+          rateLimitInfo: rateLimitResult
+        });
         void notifyPaymentWebhook({
           event: 'payment.queued',
           paymentId,
@@ -152,10 +176,12 @@ export class MultiProviderPaymentService {
       auditLogger.log('Payment executed successfully', { 
         userId: request.userId, 
         transactionId, 
+        paymentId,
         meter_id: request.meter_id, 
         amount: request.amount,
         providerId: request.providerId,
-        providerName: provider.name
+        providerName: provider.name,
+        timestamp: new Date().toISOString()
       });
       void notifyPaymentWebhook({
         event: 'payment.completed',
@@ -180,6 +206,15 @@ export class MultiProviderPaymentService {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown payment error';
       logger.error('Multi-provider payment processing failed', { error, request });
+      auditLogger.error('Multi-provider payment processing failed', {
+        userId: request.userId,
+        providerId: request.providerId,
+        meterId: request.meter_id,
+        amount: request.amount,
+        paymentId,
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined
+      });
       void notifyPaymentWebhook({
         event: 'payment.failed',
         paymentId,
@@ -203,6 +238,8 @@ export class MultiProviderPaymentService {
    * Execute payment using a specific provider's contract
    */
   private async executeProviderPayment(request: ProviderPaymentRequest, provider: UtilityProvider): Promise<string> {
+    const { updateTransactionStatus } = await import('./websocketService');
+    
     // Import the client dynamically to avoid circular dependencies
     const NepaClient = await import('../../../contract/nepa_client_v2' as any);
     
@@ -218,6 +255,12 @@ export class MultiProviderPaymentService {
       memo: (request as any).memo
     });
 
+    const transactionId = tx.hash || `tx_${request.providerId}_${Date.now()}`;
+    
+    // Update status to pending when transaction is created
+    await updateTransactionStatus(transactionId, 'pending');
+    logger.info('Transaction created', { transactionId, meterId: request.meter_id, providerId: request.providerId });
+
     // For backend processing, we'd need to sign with the admin key
     // This is a simplified version - in production, you'd want more secure key management
     const adminSecret = process.env.ADMIN_SECRET_KEY;
@@ -228,19 +271,24 @@ export class MultiProviderPaymentService {
     const { Keypair } = await import('@stellar/stellar-sdk');
     const adminKeypair = Keypair.fromSecret(adminSecret);
 
+    // Update status to confirming when submitting to blockchain
+    await updateTransactionStatus(transactionId, 'confirming');
+    logger.info('Transaction submitting to blockchain', { transactionId, meterId: request.meter_id, providerId: request.providerId });
+
     await tx.signAndSend({
       signTransaction: async (transaction: any) => {
         logger.debug('Signing payment transaction', { 
           meter_id: request.meter_id,
           providerId: request.providerId,
-          providerName: provider.name
+          providerName: provider.name,
+          transactionId
         });
         transaction.sign(adminKeypair);
         return transaction.toXDR();
       }
     });
 
-    return tx.hash || `tx_${request.providerId}_${Date.now()}`;
+    return transactionId;
   }
 
   /**

@@ -1,8 +1,9 @@
 import { RateLimiter, RateLimitConfig, RateLimitResult } from './rate-limiter';
 import { kycService, KYCStatus } from './services/kyc-service';
 import { notifyPaymentWebhook } from './services/paymentWebhookService';
+import { EmailNotificationService } from './services/emailNotificationService';
 import logger, { auditLogger } from './utils/logger';
-import { PaymentRequest as SharedPaymentRequest, PaymentResponse, RateLimitInfo, createApiResponse } from '../shared/types';
+import { PaymentRequest as SharedPaymentRequest, PaymentResponse, RateLimitInfo, createApiResponse } from '../../shared/types';
 import { accountingService } from './accounting-service';
 
 
@@ -13,12 +14,15 @@ export interface PaymentRequest {
   amount: number;
   userId: string;
   memo?: string;
+  nonce: string; // Unique nonce to prevent replay attacks
 }
 
 // Updated interface using standardized types
 export interface PaymentResult extends PaymentResponse {
   // Use RateLimitInfo instead of RateLimitResult to avoid type conflicts with PaymentResponse
   rateLimitInfo?: RateLimitInfo;
+  success: boolean;
+  error?: string;
 }
 
 // Helper function to convert legacy PaymentRequest to standardized format
@@ -27,7 +31,8 @@ function convertToStandardRequest(legacyRequest: PaymentRequest): SharedPaymentR
     meterId: legacyRequest.meter_id,
     amount: legacyRequest.amount,
     userId: legacyRequest.userId,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    nonce: legacyRequest.nonce
   };
 }
 
@@ -35,9 +40,11 @@ export class PaymentService {
   private rateLimiter: RateLimiter;
   private pendingPayments: Map<string, PaymentRequest> = new Map();
   private readonly maxRetryAttempts = 4;
+  private emailService?: EmailNotificationService;
 
-  constructor(rateLimitConfig: RateLimitConfig) {
+  constructor(rateLimitConfig: RateLimitConfig, emailService?: EmailNotificationService) {
     this.rateLimiter = new RateLimiter(rateLimitConfig);
+    this.emailService = emailService;
   }
 
   /**
@@ -49,6 +56,12 @@ export class PaymentService {
     try {
       // 1. KYC Check
       const kycStatus = await kycService.getStatus(request.userId);
+      auditLogger.log('KYC status check', { 
+        userId: request.userId, 
+        status: kycStatus,
+        paymentId 
+      });
+
       if (kycStatus !== KYCStatus.VERIFIED) {
         const timestamp = new Date().toISOString();
         const result: PaymentResult = {
@@ -56,6 +69,13 @@ export class PaymentService {
           error: `KYC Verification Required. Current status: ${kycStatus}`,
           timestamp,
         };
+        auditLogger.security('Payment rejected: KYC required', {
+          userId: request.userId,
+          status: kycStatus,
+          paymentId,
+          meterId: request.meter_id,
+          amount: request.amount
+        });
         void notifyPaymentWebhook({
           event: 'payment.failed',
           paymentId,
@@ -78,6 +98,13 @@ export class PaymentService {
           error: 'Transaction flagged by AML monitoring system.',
           timestamp,
         };
+        auditLogger.security('Payment rejected: AML flag', {
+          userId: request.userId,
+          paymentId,
+          meterId: request.meter_id,
+          amount: request.amount,
+          reason: 'High value transaction or suspicious activity'
+        });
         void notifyPaymentWebhook({
           event: 'payment.failed',
           paymentId,
@@ -89,6 +116,12 @@ export class PaymentService {
           reason: 'AML monitoring flagged this transaction',
         });
         return result;
+      } else {
+        auditLogger.log('AML check passed', {
+          userId: request.userId,
+          paymentId,
+          amount: request.amount
+        });
       }
 
       // Check rate limit
@@ -110,11 +143,12 @@ export class PaymentService {
       if (!rateLimitResult.allowed && !rateLimitResult.queued) {
         const timestamp = new Date().toISOString();
         logger.warn('Payment rejected: rate limit exceeded', { userId: request.userId, rateLimitResult });
-        auditLogger.log('Payment rejected due to rate limit', { 
+        auditLogger.security('Payment rejected: rate limit exceeded', { 
           userId: request.userId, 
           meterId: request.meter_id, 
           amount: request.amount,
-          reason: 'rate_limit_exceeded'
+          paymentId,
+          rateLimitInfo
         });
         const result: PaymentResult = {
           success: false,
@@ -144,7 +178,9 @@ export class PaymentService {
           userId: request.userId, 
           meterId: request.meter_id, 
           amount: request.amount,
-          queuePosition: rateLimitResult.queuePosition 
+          paymentId,
+          queuePosition: rateLimitResult.queuePosition,
+          rateLimitInfo
         });
         const result: PaymentResult = {
           success: false,
@@ -175,9 +211,11 @@ export class PaymentService {
         auditLogger.log('Payment executed successfully', { 
           userId: request.userId, 
           transactionId, 
+          paymentId,
           meterId: request.meter_id, 
           amount: request.amount,
-          status: 'success'
+          status: 'success',
+          timestamp: new Date().toISOString()
         });
 
         // Asynchronously sync with accounting software
@@ -210,6 +248,18 @@ export class PaymentService {
           rateLimitInfo,
         });
 
+        // Send email notification for successful payment (only if not a scheduled payment)
+        if (this.emailService && !request.memo?.includes('Scheduled payment')) {
+          void this.emailService.sendPaymentSuccessNotification(
+            request.userId,
+            paymentId,
+            '', // No schedule ID for regular payments
+            request.amount,
+            request.meter_id,
+            transactionId
+          );
+        }
+
         return successResult;
       } finally {
         this.pendingPayments.delete(paymentId);
@@ -219,12 +269,14 @@ export class PaymentService {
       const timestamp = new Date().toISOString();
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error('Payment processing failed', { error, request });
-      auditLogger.log('Payment failed', { 
+      auditLogger.error('Payment processing failed', { 
         userId: request.userId, 
         meterId: request.meter_id, 
         amount: request.amount,
+        paymentId,
         error: errorMessage,
-        status: 'failed'
+        status: 'failed',
+        stack: error instanceof Error ? error.stack : undefined
       });
       void notifyPaymentWebhook({
         event: 'payment.failed',
@@ -236,6 +288,19 @@ export class PaymentService {
         timestamp,
         reason: errorMessage,
       });
+
+      // Send email notification for failed payment (only if not a scheduled payment)
+      if (this.emailService && !request.memo?.includes('Scheduled payment')) {
+        void this.emailService.sendPaymentFailureNotification(
+          request.userId,
+          paymentId,
+          '', // No schedule ID for regular payments
+          request.amount,
+          request.meter_id,
+          errorMessage
+        );
+      }
+
       return {
         success: false,
         error: errorMessage,
@@ -248,6 +313,8 @@ export class PaymentService {
    * Execute the actual payment transaction
    */
   private async executePayment(request: PaymentRequest): Promise<string> {
+    const { updateTransactionStatus } = await import('./services/websocketService');
+    
     // Import the client dynamically to avoid circular dependencies
     const NepaClient = await import('../../../contract/nepa_client_v2' as any);
 
@@ -259,8 +326,15 @@ export class PaymentService {
     const tx = await client.pay_bill({
       meter_id: request.meter_id,
       amount: request.amount,
-      memo: request.memo
+      memo: request.memo,
+      nonce: request.nonce
     });
+
+    const transactionId = tx.hash || 'tx_' + Date.now();
+    
+    // Update status to pending when transaction is created
+    await updateTransactionStatus(transactionId, 'pending');
+    logger.info('Transaction created', { transactionId, meterId: request.meter_id });
 
     // For backend processing, we'd need to sign with the admin key
     // Using secure key management
@@ -270,23 +344,28 @@ export class PaymentService {
     const { Keypair } = await import('@stellar/stellar-sdk');
     const adminKeypair = Keypair.fromSecret(adminSecret);
 
+    // Update status to confirming when submitting to blockchain
+    await updateTransactionStatus(transactionId, 'confirming');
+    logger.info('Transaction submitting to blockchain', { transactionId, meterId: request.meter_id });
+
     await this.executeWithRetry(
       async () => {
         await tx.signAndSend({
           signTransaction: async (transaction: any) => {
-            logger.debug('Signing payment transaction', { meter_id: request.meter_id });
+            logger.debug('Signing payment transaction', { meter_id: request.meter_id, transactionId });
             transaction.sign(adminKeypair);
             return transaction.toXDR();
           }
         });
       },
-      request
+      request,
+      transactionId
     );
 
-    return tx.hash || 'tx_' + Date.now();
+    return transactionId;
   }
 
-  private async executeWithRetry(operation: () => Promise<void>, request: PaymentRequest): Promise<void> {
+  private async executeWithRetry(operation: () => Promise<void>, request: PaymentRequest, transactionId?: string): Promise<void> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < this.maxRetryAttempts; attempt += 1) {
@@ -295,6 +374,7 @@ export class PaymentService {
           logger.warn('Retrying failed payment transaction', {
             meterId: request.meter_id,
             userId: request.userId,
+            transactionId,
             attempt: attempt + 1
           });
         }
@@ -311,6 +391,7 @@ export class PaymentService {
         }
 
         const delayMs = this.getRetryDelayMs(attempt, isCongestion);
+        logger.info('Waiting before retry', { delayMs, attempt: attempt + 1, transactionId });
         await this.sleep(delayMs);
       }
     }

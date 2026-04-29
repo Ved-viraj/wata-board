@@ -20,6 +20,8 @@ import { logClientError } from './services/errorLoggingService';
 import { TransactionStatus } from './components/TransactionStatus';
 import { QRCodePayment } from './components/QRCodePayment';
 import { useRealtimeTransactions } from './hooks/useRealtimeTransactions';
+import { ProviderSelector } from './components/ProviderSelector';
+import type { UtilityProvider } from './types/provider';
 
 // Hooks & Utils
 import { isConnected, requestAccess, signTransaction, setWalletType } from "./utils/wallet-bridge";
@@ -31,10 +33,16 @@ import { handleOfflineError, getOfflineErrorMessage } from './utils/offlineApi';
 import { announceToScreenReader, generateId, setupKeyboardNavigation, setupFocusVisible } from './utils/accessibility';
 import { sanitizeAlphanumeric, sanitizeAmount, isValidMeterId } from './utils/sanitize';
 import { logger } from './utils/logger';
+import { paymentEvents } from './utils/paymentEvents';
 
 // Services
 import { SchedulingService } from './services/schedulingService';
 import { NotificationService } from './services/notificationService';
+
+//payment receipt
+import { usePaymentReceipt } from "./hooks/usePaymentReceipt";
+import { PaymentReceiptCard } from "./components/PaymentReceiptCard";
+
 
 // Pages - Lazy loaded for performance
 const About = lazy(() => import('./pages/About'));
@@ -55,6 +63,7 @@ const Home = memo(() => {
   const [status, setStatus] = useState('');
   const [transactionDetails, setTransactionDetails] = useState<TransactionDetails | null>(null);
   const [paymentType, setPaymentType] = useState<'manual' | 'qr'>('manual');
+  const [selectedProvider, setSelectedProvider] = useState<UtilityProvider | null>(null);
   const { connectionState, transactionState, lastUpdated, error: transactionUpdateError } = useRealtimeTransactions(transactionDetails?.hash);
 
   const networkConfig = getCurrentNetworkConfig();
@@ -77,7 +86,7 @@ const Home = memo(() => {
 
   const handlePayment = useCallback(async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    
+
     try {
       logger.info('Payment process initiated', { meterId: sanitizeAlphanumeric(meterId, 50), amount });
       const result = await isConnected();
@@ -103,13 +112,16 @@ const Home = memo(() => {
 
       const sanitizedMeterId = sanitizeAlphanumeric(meterId, 50);
       const parsedAmount = sanitizeAmount(amount);
-      
+
       if (Number.isNaN(parsedAmount) || parsedAmount <= 0) {
         setStatus(t('payment.status.enterValidAmount'));
         announceToScreenReader(t('payment.status.enterValidAmount'));
         document.getElementById(amountInputId.current)?.focus();
         return;
       }
+
+      const { receipt, isReceiptVisible, triggerReceipt, closeReceipt } =
+        usePaymentReceipt({ stellarAccount: walletPublicKey });
 
       const amountU32 = Math.floor(parsedAmount);
 
@@ -127,10 +139,10 @@ const Home = memo(() => {
 
       const horizonUrl = networkConfig.rpcUrl.replace('soroban', 'horizon');
       const server = new Horizon.Server(horizonUrl);
-      
+
       const account = await server.loadAccount(pubKeyString);
       const transactionBuilder = new TransactionBuilder(account, {
-        fee: BASE_FEE,
+        fee: feeEstimate ? feeEstimate.baseFee.toString() : BASE_FEE,
         networkPassphrase: networkConfig.networkPassphrase,
       })
         .addOperation(Operation.payment({
@@ -184,7 +196,7 @@ const Home = memo(() => {
 
       setStatus(t('payment.status.paymentSuccess', { id: (submitResult as any).hash.slice(0, 10) }));
       announceToScreenReader(t('payment.status.paymentSuccess', { id: (submitResult as any).hash.slice(0, 10) }));
-      
+
       setTransactionDetails({
         hash: submitResult.hash,
         meterId: sanitizedMeterId,
@@ -194,11 +206,18 @@ const Home = memo(() => {
         network: getNetworkFromEnv(),
         explorerUrl: networkConfig.explorerUrl
       });
-      
+
       setMeterId('');
       setAmount('');
       setMemoText('');
-      setTimeout(() => refreshBalance(), 2000);
+      
+      // Emit payment completion event for automatic balance refresh
+      paymentEvents.emitPaymentCompleted({
+        transactionId: submitResult.hash,
+        amount: amountU32,
+        meterId: sanitizedMeterId,
+        source: 'manual_payment'
+      });
 
     } catch (err: any) {
       logger.error('Payment processing failed', err, { meterId, amount });
@@ -261,43 +280,41 @@ const Home = memo(() => {
                 lastUpdated={lastUpdated}
                 error={transactionUpdateError}
               />
-              <TransactionSuccess 
-                details={transactionDetails} 
+              <TransactionSuccess
+                details={transactionDetails}
                 onReset={() => {
                   setTransactionDetails(null);
                   setStatus('');
-                }} 
+                }}
               />
             </>
           ) : (
             <div className="mt-8 space-y-6" aria-labelledby="payment-form-title">
               <h2 id="payment-form-title" className="sr-only">Payment Options</h2>
-              
+
               <div className="border-b border-slate-200 dark:border-slate-800">
                 <nav className="-mb-px flex gap-4 sm:gap-8 overflow-x-auto whitespace-nowrap pb-1" aria-label="Payment type">
                   <button
                     onClick={() => setPaymentType('manual')}
-                    className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
-                      paymentType === 'manual'
+                    className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${paymentType === 'manual'
                         ? 'border-sky-500 text-sky-600 dark:text-sky-400'
                         : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
-                    }`}
+                      }`}
                     aria-selected={paymentType === 'manual'}
                     role="tab"
                   >
-                    {t('payment.manual.tab') || 'Manual Payment'}
+                    {t('payment.manual.tab')}
                   </button>
                   <button
                     onClick={() => setPaymentType('qr')}
-                    className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${
-                      paymentType === 'qr'
+                    className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${paymentType === 'qr'
                         ? 'border-sky-500 text-sky-600 dark:text-sky-400'
                         : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
-                    }`}
+                      }`}
                     aria-selected={paymentType === 'qr'}
                     role="tab"
                   >
-                    {t('payment.qr.tab') || 'QR Code Payment'}
+                    {t('payment.qr.tab')}
                   </button>
                 </nav>
               </div>
@@ -316,6 +333,12 @@ const Home = memo(() => {
                   )}
 
                   <div className="space-y-4">
+                    <ProviderSelector
+                      selectedProviderId={selectedProvider?.id}
+                      onProviderSelect={setSelectedProvider}
+                      disabled={isProcessing}
+                      className="w-full"
+                    />
                     <div className="relative">
                       <label htmlFor={meterInputId.current} className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 ml-1">
                         {t('payment.form.meterNumber')}
@@ -352,19 +375,19 @@ const Home = memo(() => {
 
                     <div className="relative">
                       <label htmlFor={memoInputId.current} className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 ml-1">
-                        {t('payment.form.memo') || 'Memo (Optional)'}
+                        {t('payment.form.memo')}
                       </label>
                       <input
                         id={memoInputId.current}
                         type="text"
                         value={memoText}
                         onChange={(e) => setMemoText(e.target.value)}
-                        placeholder={t('payment.form.memoPlaceholder') || 'What is this for?'}
+                        placeholder={t('payment.form.memoPlaceholder')}
                         className="h-12 w-full rounded-xl border border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-950 px-4 text-slate-900 dark:text-slate-100 placeholder-slate-400 ring-sky-500/20 transition-all focus:border-sky-500/50 focus:outline-none focus:ring-4"
                         disabled={isProcessing}
                         maxLength={28}
                       />
-                      <p className="mt-1 text-[10px] text-slate-500 ml-1">Max 28 characters for text memos</p>
+                      <p className="mt-1 text-[10px] text-slate-500 ml-1">{t('payment.form.memoDescription')}</p>
                     </div>
                   </div>
 
@@ -387,9 +410,9 @@ const Home = memo(() => {
                       </div>
                     </button>
 
-                    <div 
+                    <div
                       id={statusId.current}
-                      role="status" 
+                      role="status"
                       aria-live="polite"
                       className={`min-h-[1.5rem] px-1 text-center text-sm font-medium ${status.includes('success') ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}
                     >
@@ -398,7 +421,7 @@ const Home = memo(() => {
                   </div>
                 </form>
               ) : (
-                <QRCodePayment 
+                <QRCodePayment
                   onPaymentComplete={(transactionId) => {
                     setStatus(t('payment.status.paymentSuccess', { id: transactionId.slice(0, 10) }));
                     announceToScreenReader(t('payment.status.paymentSuccess', { id: transactionId.slice(0, 10) }));
@@ -415,10 +438,10 @@ const Home = memo(() => {
         </div>
 
         <footer className="mt-12 text-center text-xs text-slate-400 dark:text-slate-500">
-          <p className="mb-2">© {new Date().getFullYear()} Wata-Board. {t('app.footer.tagline')}</p>
+          <p className="mb-2"> {new Date().getFullYear()} Wata-Board. {t('app.footer.tagline')}</p>
           <div className="flex justify-center gap-4">
-            <a href="/privacy-policy" className="hover:text-sky-500 transition-colors">Privacy Policy</a>
-            <a href="/retention-policy" className="hover:text-sky-500 transition-colors">Data Retention Policy</a>
+            <a href="/privacy-policy" className="hover:text-sky-500 transition-colors">{t('app.footer.privacyPolicy')}</a>
+            <a href="/retention-policy" className="hover:text-sky-500 transition-colors">{t('app.footer.dataRetentionPolicy')}</a>
           </div>
         </footer>
       </div>
@@ -468,4 +491,24 @@ export default function App() {
       </ThemeProvider>
     </ErrorBoundary>
   );
+}
+// After a successful pay_bill transaction:
+triggerReceipt({
+  transactionHash: txResult.hash,
+  meterId: formValues.meterId,
+  meterType: "water",          // or "electricity"
+  amountPaid: formValues.amount,
+  billingPeriod: "May 2025",
+  status: "confirmed",
+});
+
+// In JSX:
+{
+  isReceiptVisible && receipt && (
+    <PaymentReceiptCard
+      receipt={receipt}
+      onClose={closeReceipt}
+      onNewPayment={() => { closeReceipt(); resetForm(); }}
+    />
+  )
 }

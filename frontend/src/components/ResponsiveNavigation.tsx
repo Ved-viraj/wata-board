@@ -1,26 +1,29 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { NetworkSwitcher } from './NetworkSwitcher';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import MobileNavigation from './MobileNavigation';
 import { announceToScreenReader, trapFocus, generateId, getAriaLabel } from '../utils/accessibility';
 
-// Navigation items - single source of truth
-const NAV_ITEMS = [
-  { path: '/', label: 'Pay Bill' },
-  { path: '/schedules', label: 'Schedules' },
-  { path: '/analytics', label: 'Analytics' },
-  { path: '/monitoring', label: 'Monitoring' },
-  { path: '/about', label: 'About' },
-  { path: '/contact', label: 'Contact' },
-];
-
 export const ResponsiveNavigation: React.FC = memo(() => {
+  const { t } = useTranslation();
+
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const location = useLocation();
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  // Navigation items - single source of truth
+  const NAV_ITEMS = [
+    { path: '/', label: t('navigation.home') },
+    { path: '/schedules', label: t('navigation.schedules') || 'Schedules' },
+    { path: '/analytics', label: t('navigation.analytics') || 'Analytics' },
+    { path: '/monitoring', label: t('navigation.monitoring') || 'Monitoring' },
+    { path: '/about', label: t('navigation.about') },
+    { path: '/contact', label: t('navigation.contact') },
+  ];
 
   const navigationId = useRef(generateId('navigation'));
   const menuButtonId = useRef(generateId('menu-button'));
@@ -34,27 +37,14 @@ export const ResponsiveNavigation: React.FC = memo(() => {
   const closeMobileMenu = useCallback(() => {
     if (isMobileMenuOpen) {
       setIsMobileMenuOpen(false);
-      announceToScreenReader('Navigation menu closed');
+      announceToScreenReader(t('accessibility.navigation.menuClosed'));
       if (cleanupRef.current) {
         cleanupRef.current();
         cleanupRef.current = null;
       }
       menuButtonRef.current?.focus();
     }
-  }, [isMobileMenuOpen]);
-
-  const toggleMobileMenu = useCallback(() => {
-    const next = !isMobileMenuOpen;
-    setIsMobileMenuOpen(next);
-    if (next) {
-      announceToScreenReader('Navigation menu opened');
-      if (mobileMenuRef.current) {
-        cleanupRef.current = trapFocus(mobileMenuRef.current);
-      }
-    } else {
-      closeMobileMenu();
-    }
-  }, [isMobileMenuOpen, closeMobileMenu]);
+  }, [isMobileMenuOpen, t]);
 
   // Close on route change
   useEffect(() => {
@@ -161,7 +151,6 @@ export const ResponsiveNavigation: React.FC = memo(() => {
               ))}
             </div>
           </div>
-        </div>
       </nav>
 
       {/* Mobile Navigation Menu */}
