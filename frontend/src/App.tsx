@@ -293,7 +293,7 @@ const Home = memo(() => {
               <h2 id="payment-form-title" className="sr-only">Payment Options</h2>
 
               <div className="border-b border-slate-200 dark:border-slate-800">
-                <nav className="-mb-px flex space-x-8" aria-label="Payment type">
+                <nav className="-mb-px flex gap-4 sm:gap-8 overflow-x-auto whitespace-nowrap pb-1" aria-label="Payment type">
                   <button
                     onClick={() => setPaymentType('manual')}
                     className={`py-2 px-1 border-b-2 font-medium text-sm transition-colors ${paymentType === 'manual'
@@ -460,34 +460,36 @@ export default function App() {
   }, []);
 
   return (
-    <ThemeProvider>
-      <Router>
-        <ErrorBoundary
-          FallbackComponent={GlobalErrorFallback}
-          onError={(error, errorInfo) => logClientError(error, errorInfo?.componentStack || '', { module: 'App' })}
-        >
-          <div className="app-container min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
-            <SkipLinks />
-            <OfflineBanner />
+    <ErrorBoundary fallback={<GlobalErrorFallback />}>
+      <ThemeProvider>
+        <Router>
+          <SkipLinks />
+          <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
             <ResponsiveNavigation />
-
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/about" element={<Suspense fallback={<div>{t('app.loading')}</div>}><About /></Suspense>} />
-              <Route path="/contact" element={<Suspense fallback={<div>{t('app.loading')}</div>}><Contact /></Suspense>} />
-              <Route path="/rate" element={<Suspense fallback={<div>{t('app.loading')}</div>}><Rate /></Suspense>} />
-              <Route path="/schedules" element={<Suspense fallback={<div>{t('app.loading')}</div>}><ScheduledPayments /></Suspense>} />
-              <Route path="/analytics" element={<Suspense fallback={<div>{t('app.loading')}</div>}><AnalyticsDashboard /></Suspense>} />
-              <Route path="/monitoring" element={<Suspense fallback={<div>{t('app.loading')}</div>}><RealTimeMonitoringDashboard /></Suspense>} />
-              <Route path="/privacy-policy" element={<Suspense fallback={<div>{t('app.loading')}</div>}><PrivacyPolicy /></Suspense>} />
-              <Route path="/retention-policy" element={<Suspense fallback={<div>{t('app.loading')}</div>}><DataRetentionPolicy /></Suspense>} />
-              <Route path="/payment" element={<Suspense fallback={<div>{t('app.loading')}</div>}><QRPaymentHandler /></Suspense>} />
-            </Routes>
+            <OfflineBanner />
+            <Suspense fallback={
+              <div className="flex h-[50vh] items-center justify-center">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-sky-500 border-t-transparent" />
+              </div>
+            }>
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/about" element={<About />} />
+                <Route path="/contact" element={<Contact />} />
+                <Route path="/rate" element={<Rate />} />
+                <Route path="/schedules" element={<ScheduledPayments />} />
+                <Route path="/pay/qr" element={<QRPaymentHandler />} />
+                <Route path="/privacy-policy" element={<PrivacyPolicy />} />
+                <Route path="/retention-policy" element={<DataRetentionPolicy />} />
+                <Route path="/analytics" element={<AnalyticsDashboard />} />
+                <Route path="/monitoring" element={<RealTimeMonitoringDashboard />} />
+              </Routes>
+            </Suspense>
             <GDPRConsent />
           </div>
-        </ErrorBoundary>
-      </Router>
-    </ThemeProvider>
+        </Router>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }
 // After a successful pay_bill transaction:
