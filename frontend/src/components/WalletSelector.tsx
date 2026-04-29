@@ -122,8 +122,8 @@ export const WalletSelector: React.FC<WalletSelectorProps> = ({
         ))}
       </div>
 
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-slate-400">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-4">
+        <div className="text-xs text-slate-400 text-center sm:text-left">
           {connectedAddress ? (
             <span className="text-green-400">{t('wallet.selector.connected', { address: `${connectedAddress.slice(0, 8)}...${connectedAddress.slice(-4)}` })}</span>
           ) : (

@@ -1,27 +1,169 @@
-// src/services/receiptService.ts
-// Generates downloadable PDF receipts for Wata-Board utility payments.
-// Uses jsPDF (install: npm install jspdf) — no canvas required.
+import html2pdf from 'html2pdf.js';
+import QRCode from 'qrcode';
+import type { FrontendReceipt as Receipt, FrontendReceiptData as ReceiptData, ReceiptGenerationOptions } from '../types/receipt';
+import { toISOString, fromDateISOString } from '../../../shared/types';
+
+/**
+ * Service for generating, storing, and retrieving payment receipts
+ */
+export class ReceiptService {
+  private static readonly STORAGE_KEY = 'wata-board-receipts';
+  private static readonly RECEIPT_PREFIX = 'RCP';
+  private receipts: Map<string, Receipt> = new Map();
+
+  constructor() {
+    this.loadFromStorage();
+  }
+
+  /**
+   * Generate a new receipt number
+   */
+  private generateReceiptNumber(): string {
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `${ReceiptService.RECEIPT_PREFIX}-${timestamp}-${random}`;
+  }
 
 import type { PaymentReceipt, ReceiptGenerationOptions } from "../types/receipt";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function truncateHash(hash: string, chars = 8): string {
-  if (hash.length <= chars * 2 + 3) return hash;
-  return `${hash.slice(0, chars)}...${hash.slice(-chars)}`;
-}
+  /**
+   * Generate QR code for receipt
+   */
+  private async generateQRCode(data: Record<string, any>): Promise<string> {
+    try {
+      const qrText = JSON.stringify(data);
+      return await QRCode.toDataURL(qrText, {
+        errorCorrectionLevel: 'H',
+        type: 'image/png',
+        margin: 1,
+        width: 200,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        }
+      });
+    } catch (error) {
+      console.error('Failed to generate QR code:', error);
+      return '';
+    }
+  }
 
-function formatXLM(amount: number): string {
-  return `${amount.toFixed(7)} XLM`;
-}
+  /**
+   * Generate PDF receipt
+   */
+  async generatePDF(receipt: Receipt, includeWatermark = true): Promise<Blob> {
+    const htmlContent = this.generateHTMLReceipt(receipt, includeWatermark);
+    const el = document.createElement('div');
+    el.innerHTML = htmlContent;
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        margin: 10,
+        filename: `receipt-${receipt.receiptNumber}.pdf`,
+        image: { type: 'png' as const, quality: 0.98 },
+        html2canvas: { scale: 2 },
+        jsPDF: { orientation: 'portrait' as const, unit: 'mm', format: 'a4' }
+      };
 
-function formatDate(date: Date): string {
-  return date.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "long",
-    year: "numeric",
-  });
-}
+      html2pdf().set(options).from(el).toPdf().get('pdf').then((pdf: any) => {
+        resolve(pdf.output('blob'));
+      }).catch(reject);
+    });
+  }
+
+  /**
+   * Generate HTML receipt
+   */
+  private generateHTMLReceipt(receipt: Receipt, includeWatermark = true): string {
+    return `
+      <html>
+        <head>
+          <style>
+            * { margin: 0; padding: 0; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: white; }
+            .receipt-container { max-width: 600px; margin: 0 auto; padding: 40px; }
+            .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 20px; }
+            .company-name { font-size: 28px; font-weight: bold; color: #333; margin-bottom: 5px; }
+            .receipt-title { font-size: 18px; color: #666; margin-bottom: 10px; }
+            .receipt-number { font-size: 12px; color: #999; font-family: monospace; }
+            .section { margin-bottom: 25px; }
+            .section-title { font-size: 12px; font-weight: bold; color: #333; text-transform: uppercase; margin-bottom: 10px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+            .detail-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .label { color: #666; }
+            .value { font-weight: 500; color: #333; }
+            .amount-section { background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+            .amount-label { font-size: 12px; color: #666; }
+            .amount-value { font-size: 32px; font-weight: bold; color: ${receipt.status === 'generated' || receipt.status === 'viewed' ? '#10b981' : '#666'}; }
+            .status-badge { display: inline-block; padding: 5px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; text-transform: uppercase; margin-top: 10px; }
+            .status-completed { background-color: #d1fae5; color: #065f46; }
+            .status-pending { background-color: #fef3c7; color: #92400e; }
+            .qr-section { text-align: center; margin: 20px 0; }
+            .qr-code { max-width: 150px; }
+            .footer { text-align: center; font-size: 11px; color: #999; border-top: 1px solid #ddd; padding-top: 20px; margin-top: 30px; }
+            .watermark { position: absolute; font-size: 72px; color: rgba(200, 200, 200, 0.1); transform: rotate(-45deg); z-index: -1; }
+            @media print { body { background: white; } }
+          </style>
+        </head>
+        <body>
+          ${includeWatermark ? '<div class="watermark">RECEIPT</div>' : ''}
+          <div class="receipt-container">
+            <div class="header">
+              <div class="company-name">${receipt.providerName}</div>
+              <div class="receipt-title">Payment Receipt</div>
+              <div class="receipt-number">Receipt #${receipt.receiptNumber}</div>
+            </div>
+
+            <div class="amount-section">
+              <div class="amount-label">Payment Amount</div>
+              <div class="amount-value">${receipt.amount} ${receipt.currency}</div>
+              <span class="status-badge status-${receipt.status}">
+                ${receipt.status.toUpperCase()}
+              </span>
+            </div>
+
+            <div class="section">
+              <div class="section-title">Transaction Details</div>
+              <div class="detail-row">
+                <span class="label">Date</span>
+                <span class="value">${new Date(receipt.date).toLocaleDateString()} ${new Date(receipt.date).toLocaleTimeString()}</span>
+              </div>
+              <div class="detail-row">
+                <span class="label">Meter ID</span>
+                <span class="value">${receipt.meterId}</span>
+              </div>
+              ${receipt.transactionHash ? `
+              <div class="detail-row">
+                <span class="label">Blockchain Hash</span>
+                <span class="value" style="font-family: monospace; font-size: 11px;">${receipt.transactionHash.substring(0, 20)}...</span>
+              </div>
+              ` : ''}
+            </div>
+
+            ${receipt.qrCode ? `
+            <div class="qr-section">
+              <img src="${receipt.qrCode}" alt="Receipt QR Code" class="qr-code" />
+              <p style="font-size: 11px; color: #999; margin-top: 10px;">Scan to verify receipt</p>
+            </div>
+            ` : ''}
+
+            ${receipt.notes ? `
+            <div class="section">
+              <div class="section-title">Notes</div>
+              <p style="font-size: 13px; color: #666; line-height: 1.6;">${receipt.notes}</p>
+            </div>
+            ` : ''}
+
+            <div class="footer">
+              <p>Generated on ${new Date().toLocaleDateString()}</p>
+              <p>Thank you for using ${receipt.providerName}</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+  }
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("en-GB", {
@@ -228,52 +370,57 @@ export async function generateReceiptPDF(
     doc.setLineDash([]);
   }
 
-  // Payment Details
-  sectionHeader("Payment Details", y);
-  y += 10;
-  tableRow("Date", formatDate(receipt.timestamp), y, true);
-  y += 7.5;
-  tableRow("Time", formatTime(receipt.timestamp), y);
-  y += 7.5;
-  tableRow("Billing Period", receipt.billingPeriod ?? "—", y, true);
-  y += 7.5;
-  tableRow("Meter ID", receipt.meterId, y);
-  y += 7.5;
-  tableRow(
-    "Meter Type",
-    receipt.meterType.charAt(0).toUpperCase() + receipt.meterType.slice(1),
-    y,
-    true
-  );
-
-  if (receipt.customerName) {
-    y += 7.5;
-    tableRow("Customer", receipt.customerName, y);
+  /**
+   * Load receipts from localStorage
+   */
+  private loadFromStorage(): void {
+    try {
+      const stored = localStorage.getItem(ReceiptService.STORAGE_KEY);
+      if (stored) {
+        const receipts = JSON.parse(stored) as Receipt[];
+        receipts.forEach(r => {
+          r.date = fromDateISOString(r.date as unknown as string);
+          if (r.billPeriod) {
+            r.billPeriod.start = fromDateISOString(r.billPeriod.start as unknown as string);
+            r.billPeriod.end = fromDateISOString(r.billPeriod.end as unknown as string);
+          }
+          this.receipts.set(r.id, r);
+        });
+      }
+    } catch (error) {
+      console.error('Failed to load receipts from storage:', error);
+    }
   }
   if (receipt.customerAddress) {
     y += 7.5;
     tableRow("Address", receipt.customerAddress, y, true);
   }
 
-  // ── Section: Transaction Details ────────────────────────────────────────────
-  y += 14;
-  sectionHeader("Blockchain Transaction", y);
-  y += 10;
-  tableRow(
-    "Transaction Hash",
-    truncateHash(receipt.transactionHash, 10),
-    y,
-    true
-  );
-  y += 7.5;
-  tableRow("Stellar Account", truncateHash(receipt.stellarAccount, 10), y);
-  y += 7.5;
-  tableRow("Network", receipt.network === "mainnet" ? "Mainnet" : "Testnet", y, true);
-  y += 7.5;
-  tableRow("Contract ID", truncateHash(receipt.contractId, 10), y);
-  if (receipt.blockHeight) {
-    y += 7.5;
-    tableRow("Block / Ledger", receipt.blockHeight.toLocaleString(), y, true);
+  /**
+   * Export receipts as CSV
+   */
+  exportAsCSV(): string {
+    const receipts = Array.from(this.receipts.values());
+    if (receipts.length === 0) return '';
+
+    const headers = ['Receipt Number', 'Payment ID', 'Meter ID', 'Amount', 'Currency', 'Date', 'Status', 'Transaction Hash'];
+    const rows = receipts.map(r => [
+      r.receiptNumber,
+      r.paymentId,
+      r.meterId,
+      r.amount,
+      r.currency,
+      toISOString(r.date),
+      r.status,
+      r.transactionHash || ''
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+
+    return csvContent;
   }
 
   // ── Section: Amount Breakdown ───────────────────────────────────────────────
