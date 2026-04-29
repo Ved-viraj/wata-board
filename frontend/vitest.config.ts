@@ -20,11 +20,19 @@ export default defineConfig({
         'dist/',
         'coverage/'
       ]
+    },
+    server: {
+      deps: {
+        inline: ['jspdf', 'jspdf-autotable']
+      }
     }
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src')
     }
+  },
+  optimizeDeps: {
+    include: ['fast-check', 'jspdf', 'jspdf-autotable']
   }
 })
