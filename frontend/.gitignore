@@ -11,7 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
-
+.kiro
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -25,3 +25,5 @@ dist-ssr
 
 # PR documentation
 PR-*.md
+MERGE-CONFLICT-RESOLUTION.md
+event-listener-cleanup-fixes.md
